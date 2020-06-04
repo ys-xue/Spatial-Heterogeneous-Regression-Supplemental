@@ -1,0 +1,284 @@
+---
+title: "Implementing Bayesian Heterogeneity Pursuit Regression Using nimble"
+output: 
+  html_document:
+    highlight: pygment
+bibliography: ../draft/DP_LMM.bib
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+install.packages(c("ggplot", "ggmap", "tidyverse", "gridExtra",
+                  "maps", "data.table", "nimble", "coda", "fossil",
+                  "shapefiles", "mapproj"))
+library(ggmap)
+library(maps)
+library(data.table)
+library(dplyr)
+library(gridExtra)
+```
+
+This webpage is created as an online supplemental material for the manuscript
+**Bayesian Heterogeneity Pursuit Regression Models for Spatially Dependent Data**.
+
+
+We consider the second alternative approach as an illustration as the null,
+no-variation case is trivial, and comparison of the truth and clustering
+results under the first random true cluster setting can be hard to read on plots.
+Using the spatial structure of Georgia state, we first partition the map, and
+create a set of observed $\mathbf{Y}$ and covariate matrix $\mathbf{X}$. The matrix
+of great circle distances is provided in a separate `GAcentroidgcs.rds` file.
+Note that entries in this matrix have been normalized to have a maximum value
+of 10. The latitude and longitude of county centroids are provided in
+`GAcentroids.rds`. We load both into `R` workspace first.
+
+```{r class.source = c("numcode", "R", "numberLines"), message = FALSE}
+distMat <- readRDS("./GAcentroidgcd.rds")
+centroids <- as.data.frame(readRDS("GAcentroids.rds"))
+N <- S <- 159
+```
+
+```{r, echo = FALSE, fig.align="center", fig.width=4, fig.height=4}
+a <- 1:159
+map.county <- map_data('county')
+counties   <- unique(map.county[, 5:6])
+gacounties <- counties[counties$region == "georgia", ]
+age_map <- data.frame(
+  state_names = gacounties$region,
+  county_names = gacounties$subregion,
+  Region = factor(a)
+)
+age_map <- data.table(age_map)
+setkey(age_map, state_names, county_names)
+
+map.county <-
+  data.table(map.county[map.county$region == "georgia", ])
+setkey(map.county, region, subregion)
+
+
+map.df <- map.county[age_map]
+
+for (i in 1:nrow(centroids)) {
+  if (centroids$x[i] - 2 * centroids$y[i] < -150) {
+  map.df[map.df$subregion == row.names(centroids)[i], "Region"] <- "1"
+  } else if (centroids$x[i] + centroids$y[i] > -51) {
+    map.df[map.df$subregion == row.names(centroids)[i], "Region"] <- "2"
+  } else {
+    map.df[map.df$subregion == row.names(centroids)[i], "Region"] <- "3"
+  }
+}
+
+map.df$Cluster <- factor(map.df$Region)
+
+myplot <- ggplot(map.df, aes(x = long, y = lat, fill = Cluster)) +
+  geom_polygon(aes(group = group),  color = "black") + 
+  coord_map() +
+  xlab("Longitude") + ylab("Latitude") + 
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_fill_brewer(palette = "OrRd") + theme_bw()
+
+myplot
+```
+
+
+For the setting in the figure above, we next define the parameters for each
+location. For ease of exposition we use Setting 3, which has the strongest
+signals among all three settings.
+
+```{r class.source = c("numcode", "R", "numberLines")}
+## to generate the true clustering setting
+asm <- c()
+for (i in 1:nrow(centroids)) {
+  if (centroids$x[i] - 2 * centroids$y[i] < -150) {
+    asm[i] <- 1
+  } else if (centroids$x[i] + centroids$y[i] > -51) {
+    asm[i] <- 2
+  } else {
+    asm[i] <- 3
+  }
+}
+betaMat <- t(matrix(nrow = 159, ncol = 6, byrow = TRUE))
+
+for (i in 1:159) {
+  ## cluster 1
+  betaMat[,asm == 1] <- c(9, 0, -4, 0, 2, 5)
+  ## cluster 2
+  betaMat[,asm == 2] <- c(1, 7, 3, 6, 0, -1)
+  ## cluster 3
+  betaMat[,asm == 3] <- c(2, 0, 6, 1, 7, 0)
+}
+```
+
+Next, we generate the covariates i.i.d. from the standard normal distribution,
+and generate the spatial random effect $\textbf{W}$ from the multivariate normal
+distribution with zero mean, and $\exp(-\mbox{GCD}/4)$ covariance matrix.
+
+```{r class.source = c("numcode", "R", "numberLines")}
+set.seed(3)
+
+X <- matrix(rnorm(159 * 6), nrow = 159)
+W <- MASS::mvrnorm(1, mu = rep(0, 159), Sigma = exp(-distMat / 4))
+Y <- diag(X %*% betaMat) + W + rnorm(159)
+```
+
+
+As described in the main text, the `nimblefunction()` is defined.
+
+```{r class.source = c("numcode", "R", "numberLines"), message=FALSE}
+library(nimble)
+SLMMCode <- nimbleCode({
+  for (i in 1:S) {
+    y[i] ~ dnorm(mu_y[i], tau = tau_y)
+    mu_y[i] <- b[i, 1] * x1[i] + b[i, 2] * x2[i] +
+      b[i, 3] * x3[i] + b[i, 4] * x4[i] + b[i, 5] * x5[i] +
+      b[i, 6] * x6[i] + W[i]
+    
+    b[i, 1:6] <- bm[latent[i], 1:6]
+    
+    latent[i] ~ dcat(zlatent[1:M])
+  }
+  tau_y ~ dgamma(1, 1)
+  
+  for (j in 1:S) {
+    for (k in 1:S) {
+      H[j, k] <- exp(-Dist[j, k]/phi)
+    }
+  }
+  
+  W[1:S] ~ dmnorm(mu_w[1:S], prec = prec_W[1:S, 1:S])
+  prec_W[1:S, 1:S] <- tau_w * inverse(H[1:S, 1:S])
+  
+  phi ~ dunif(0, D)
+  tau_w ~ dgamma(1, 1)
+  
+  mu_w[1:S] <- rep(0, S)
+  
+  for (k in 1:M) {
+    bm[k, 1:6] ~ dmnorm(mu_bm[1:6], cov = var_bm[1:6, 1:6])
+  }
+  var_bm[1:6, 1:6] <- 1/tau_bm * diag(rep(1, 6))
+  tau_bm ~ dgamma(1, 1)
+  
+  for (j in 1:6) {
+    mu_bm[j] ~ dnorm(0, 1)
+  }
+  
+  zlatent[1:M] <- stick_breaking(vlatent[1:(M - 1)])
+  
+  for (j in 1:(M - 1)) {
+    vlatent[j] ~ dbeta(1, alpha)
+  }
+  
+  alpha ~ dgamma(1, 1)
+
+})
+```
+
+The list of data, constant parameters, as well as starting values, are declared.
+
+```{r class.source = c("numcode", "R", "numberLines")}
+SLMMdata <- list(y = Y, x1 = X[,1], x2 = X[,2], x3 = X[,3],
+                 x4 = X[,4], x5 = X[,5], x6 = X[,6],
+                 Dist = distMat)
+
+SLMMConsts <- list(S = 159, M = 50, D = 100)
+SLMMInits <- list(tau_y = 1,
+                  latent = rep(1, SLMMConsts$S), alpha = 2,
+                  tau_bm = 1,
+                  mu_bm = rnorm(6),
+                  phi = 1,
+                  tau_w = 1,
+                  vlatent = rbeta(SLMMConsts$M - 1, 1, 1)
+)
+```
+
+We invoke MCMC to get the results. The total number of iterations is set to
+be 50000 with thinning interval 10.
+
+```{r class.source = c("numcode", "R", "numberLines"), message=FALSE}
+mcmc.out <- nimbleMCMC(code = SLMMCode, data = SLMMdata,
+                         constants = SLMMConsts,
+                         inits = SLMMInits,
+                         monitors = c("bm","b","phi", "tau_w",
+                                      "alpha", "latent", "tau_y"),
+                         niter = 50000,
+                         thin = 10, nchains = 1, setSeed = TRUE)
+## discard the first 2000 burn-in samples
+library(coda)
+pos_mcmc <- as.mcmc(mcmc.out[-c(1:2000),])
+```
+
+<!-- The output `pos_mcmc` is an `mcmc` object which has 3000 rows and 1417 columns. -->
+<!-- As indicated in lines 4 and 5 of the code chunk above, we are monitoring the -->
+<!-- chains for `bm` (the parameter estimates for each underlying cluster), `b` -->
+<!-- (the parameter estimates for each location, corresponding to their respective -->
+<!-- clusters in `bm`), `phi` (the spatial correlation parameter),  -->
+<!-- `tau_w` (the ) -->
+
+The next step is to take out the 159-dimensional latent cluster congifuration
+vector $\mathcal{Z}$, and obtain the membership matrix as in Equation (12).
+Based on the list of 3000 membership matrices, the empirical probability matrix
+is calculated, and the iteration that has the closest sum of squared distance
+from $\overline{B}$ is found. 
+
+```{r class.source = c("numcode", "R", "numberLines")}
+latentZMat <- pos_mcmc[, 1256:1414]
+
+membershipList <- purrr::map(1:nrow(latentZMat), .f = function(x) {
+  outer(latentZMat[x,], latentZMat[x, ], "==")
+})
+
+## the empirical probability matrix
+bBar <- Reduce("+", membershipList) / length(membershipList)
+
+## sum of squared differences
+lsDist <- purrr::map_dbl(membershipList, ~sum((.x - bBar) ^ 2))
+
+## find the optimal iteration, and take as the final inferenced result
+## if there are multiple optimal iterations, take the first one
+mcluster <- which.min(lsDist)
+finalCluster <- as.numeric(latentZMat[mcluster[1],])
+```
+
+The Rand index is calculated:
+
+```{r class.source = c("numcode", "R", "numberLines"), fig.align="center"}
+RI <- fossil::rand.index(finalCluster, asm)
+RI
+```
+
+The clustered results visualized together with the original partition:
+
+```{r echo=FALSE}
+a <- 1:159
+map.county <- map_data('county')
+counties   <- unique(map.county[, 5:6])
+gacounties <- counties[counties$region == "georgia", ]
+age_map <- data.frame(
+  state_names = gacounties$region,
+  county_names = gacounties$subregion,
+  Cluster = factor(finalCluster)
+)
+age_map <- data.table(age_map)
+setkey(age_map, state_names, county_names)
+
+map.county <-
+  data.table(map.county[map.county$region == "georgia", ])
+setkey(map.county, region, subregion)
+
+
+map.df <- map.county[age_map]
+
+
+
+myplot2 <- ggplot(map.df, aes(x = long, y = lat, fill = Cluster)) +
+  geom_polygon(aes(group = group),  color = "black") + 
+  coord_map() +
+  xlab("Longitude") + ylab("Latitude") + 
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_fill_brewer(palette = "OrRd") + theme_bw()
+
+gridExtra::grid.arrange(myplot, myplot2, ncol = 2)
+```
