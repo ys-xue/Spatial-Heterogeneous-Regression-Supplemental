@@ -3,7 +3,6 @@ title: "Implementing Bayesian Heterogeneity Pursuit Regression Using nimble"
 output: 
   html_document:
     highlight: pygment
-bibliography: ../draft/DP_LMM.bib
 editor_options: 
   chunk_output_type: console
 ---
@@ -21,7 +20,7 @@ library(gridExtra)
 ```
 
 This webpage is created as an online supplemental material for the manuscript
-**Bayesian Heterogeneity Pursuit Regression Models for Spatially Dependent Data**.
+**Heterogeneous Regression Models for Clusters of Spatial Dependent Data**.
 
 
 We consider the second alternative approach as an illustration as the null,
